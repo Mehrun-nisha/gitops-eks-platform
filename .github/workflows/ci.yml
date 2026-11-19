@@ -1,0 +1,90 @@
+name: app-ci
+
+on:
+  pull_request:
+    paths: ["app/**", ".github/workflows/ci.yml"]
+  push:
+    branches: [main]
+    paths: ["app/**", ".github/workflows/ci.yml"]
+
+env:
+  AWS_REGION: ap-south-1
+  ECR_REPOSITORY: demo-app
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: app
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: app/requirements-dev.txt
+      - run: pip install -r requirements-dev.txt
+      - name: Lint
+        run: flake8 --max-line-length 100 .
+      - name: Unit tests
+        run: pytest -q
+
+  build-scan-push:
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write   # to commit the image tag bump
+      id-token: write   # to request the OIDC token for AWS
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Image tag
+        id: meta
+        run: echo "tag=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+
+      - name: Build image
+        run: docker build -t demo-app:${{ steps.meta.outputs.tag }} app
+
+      - name: Scan image (fail on HIGH/CRITICAL)
+        uses: aquasecurity/trivy-action@0.24.0
+        with:
+          image-ref: demo-app:${{ steps.meta.outputs.tag }}
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+
+      # Everything below runs only on main: PRs stop after build + scan
+      - name: Configure AWS credentials (OIDC, no static keys)
+        if: github.event_name == 'push'
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Log in to ECR
+        if: github.event_name == 'push'
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Push image
+        if: github.event_name == 'push'
+        env:
+          IMAGE: ${{ steps.ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ steps.meta.outputs.tag }}
+        run: |
+          docker tag demo-app:${{ steps.meta.outputs.tag }} "$IMAGE"
+          docker push "$IMAGE"
+
+      - name: Bump image in Helm values (GitOps hand-off to Argo CD)
+        if: github.event_name == 'push'
+        env:
+          REPO: ${{ steps.ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}
+          TAG: ${{ steps.meta.outputs.tag }}
+        run: |
+          sed -i "s|^  repository: .*|  repository: ${REPO}|" helm/demo-app/values.yaml
+          sed -i "s|^  tag: .*|  tag: \"${TAG}\"|" helm/demo-app/values.yaml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add helm/demo-app/values.yaml
+          git commit -m "deploy: demo-app ${TAG}"
+          git push

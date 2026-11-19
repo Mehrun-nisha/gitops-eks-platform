@@ -1,0 +1,32 @@
+# Argo CD watches helm/demo-app on main and keeps the cluster in sync with Git.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: demo-app
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/Mehrun-nisha/gitops-eks-platform.git
+    targetRevision: main
+    path: helm/demo-app
+    helm:
+      valueFiles:
+        - values.yaml
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: demo
+  syncPolicy:
+    automated:
+      prune: true     # delete resources removed from Git
+      selfHeal: true  # revert manual kubectl changes (drift correction)
+    syncOptions:
+      - CreateNamespace=true
+    retry:
+      limit: 3
+      backoff:
+        duration: 10s
+        factor: 2
+        maxDuration: 2m

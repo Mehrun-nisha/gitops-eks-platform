@@ -1,0 +1,33 @@
+name: terraform-checks
+
+on:
+  pull_request:
+    paths: ["terraform/**", ".github/workflows/terraform.yml"]
+  push:
+    branches: [main]
+    paths: ["terraform/**", ".github/workflows/terraform.yml"]
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: terraform
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.9.5
+      - name: Format check
+        run: terraform fmt -check -recursive
+      - name: Init (no backend, no AWS credentials needed)
+        run: terraform init -backend=false
+      - name: Validate
+        run: terraform validate
+      - name: Security scan (tfsec via Trivy)
+        uses: aquasecurity/trivy-action@0.24.0
+        with:
+          scan-type: config
+          scan-ref: terraform
+          severity: HIGH,CRITICAL
+          exit-code: "0"   # report-only; tighten to "1" once findings are triaged
