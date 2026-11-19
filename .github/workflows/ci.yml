@@ -18,8 +18,8 @@ jobs:
       run:
         working-directory: app
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
           cache: pip
@@ -36,8 +36,12 @@ jobs:
     permissions:
       contents: write   # to commit the image tag bump
       id-token: write   # to request the OIDC token for AWS
+    env:
+      # Deploy steps run only once AWS is provisioned and the AWS_ROLE_ARN secret is set,
+      # so the pipeline stays green (build + scan) before then
+      DEPLOY_ENABLED: ${{ github.event_name == 'push' && secrets.AWS_ROLE_ARN != '' }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Image tag
         id: meta
@@ -47,28 +51,28 @@ jobs:
         run: docker build -t demo-app:${{ steps.meta.outputs.tag }} app
 
       - name: Scan image (fail on HIGH/CRITICAL)
-        uses: aquasecurity/trivy-action@0.24.0
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25  # v0.36.0
         with:
           image-ref: demo-app:${{ steps.meta.outputs.tag }}
           severity: HIGH,CRITICAL
           ignore-unfixed: true
           exit-code: "1"
 
-      # Everything below runs only on main: PRs stop after build + scan
+      # Everything below runs only on main with AWS configured: PRs stop after build + scan
       - name: Configure AWS credentials (OIDC, no static keys)
-        if: github.event_name == 'push'
+        if: env.DEPLOY_ENABLED == 'true'
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
 
       - name: Log in to ECR
-        if: github.event_name == 'push'
+        if: env.DEPLOY_ENABLED == 'true'
         id: ecr
         uses: aws-actions/amazon-ecr-login@v2
 
       - name: Push image
-        if: github.event_name == 'push'
+        if: env.DEPLOY_ENABLED == 'true'
         env:
           IMAGE: ${{ steps.ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ steps.meta.outputs.tag }}
         run: |
@@ -76,7 +80,7 @@ jobs:
           docker push "$IMAGE"
 
       - name: Bump image in Helm values (GitOps hand-off to Argo CD)
-        if: github.event_name == 'push'
+        if: env.DEPLOY_ENABLED == 'true'
         env:
           REPO: ${{ steps.ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}
           TAG: ${{ steps.meta.outputs.tag }}
